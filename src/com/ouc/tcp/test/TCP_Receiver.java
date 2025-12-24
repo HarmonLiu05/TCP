@@ -1,5 +1,5 @@
-/***************************2.1: ACK/NACK*****************/
-/***** Feng Hong; 2015-12-09******************************/
+/***************************3.0: 超时重传（处理丢包）*****************/
+/***** Modified for RDT 3.0 ******************************/
 package com.ouc.tcp.test;
 
 import java.io.BufferedWriter;
@@ -14,7 +14,8 @@ import com.ouc.tcp.tool.TCP_TOOL;
 public class TCP_Receiver extends TCP_Receiver_ADT {
 	
 	private TCP_PACKET ackPack;	//回复的ACK报文段
-	int sequence=1;//用于记录当前待接收的包序号，注意包序号不完全是
+	int sequence=1;//用于记录当前待接收的包序号
+	int lastCorrectSeq = 0; //RDT 3.0: 记录上一个正确接收的包序号
 		
 	/*构造函数*/
 	public TCP_Receiver() {
@@ -25,9 +26,9 @@ public class TCP_Receiver extends TCP_Receiver_ADT {
 	@Override
 	//接收到数据报：检查校验和，设置回复的ACK报文段
 	public void rdt_recv(TCP_PACKET recvPack) {
-		//检查校验码，生成ACK
+		//RDT 3.0: 检查校验码，生成ACK
 		if(CheckSum.computeChkSum(recvPack) == recvPack.getTcpH().getTh_sum()) {
-			//生成ACK报文段（设置确认号）
+			//数据包正确，生成ACK报文段
 			tcpH.setTh_ack(recvPack.getTcpH().getTh_seq());
 			ackPack = new TCP_PACKET(tcpH, tcpS, recvPack.getSourceAddr());
 			tcpH.setTh_sum(CheckSum.computeChkSum(ackPack));
@@ -36,20 +37,30 @@ public class TCP_Receiver extends TCP_Receiver_ADT {
 			//回复ACK报文段
 			reply(ackPack);
 			
+			//RDT 3.0: 更新上一个正确接收的包序号
+			lastCorrectSeq = recvPack.getTcpH().getTh_seq();
+			
 			//将接收到的正确有序的数据插入data队列，准备交付
 			dataQueue.add(recvPack.getTcpS().getData());				
 			sequence++;
+			
+			System.out.println("RDT3.0 - ACK for seq: " + recvPack.getTcpH().getTh_seq());
 		}else{
+			//RDT 3.0: 数据包损坏，发送上一个正确接收的包的ACK（重复ACK）
 			System.out.println("Recieve Computed: "+CheckSum.computeChkSum(recvPack));
-			System.out.println("Recieved Packet"+recvPack.getTcpH().getTh_sum());
-			System.out.println("Problem: Packet Number: "+recvPack.getTcpH().getTh_seq()+" + InnerSeq:  "+sequence);
-			tcpH.setTh_ack(-1);
+			System.out.println("Recieved Packet: "+recvPack.getTcpH().getTh_sum());
+			System.out.println("Problem: Packet Number: "+recvPack.getTcpH().getTh_seq()+" + InnerSeq: "+sequence);
+			
+			//RDT 3.0: 不使用NACK，发送上一个正确的ACK（重复ACK）
+			tcpH.setTh_ack(lastCorrectSeq);
 			ackPack = new TCP_PACKET(tcpH, tcpS, recvPack.getSourceAddr());
 			tcpH.setTh_sum(CheckSum.computeChkSum(ackPack));
-			//设置错误控制标志为1（数据出错）
-			tcpH.setTh_eflag((byte)1);
-			//回复ACK报文段
+			//ACK包设置为0
+			tcpH.setTh_eflag((byte)0);
+			//回复重复ACK
 			reply(ackPack);
+			
+			System.out.println("RDT3.0 - Duplicate ACK for seq: " + lastCorrectSeq);
 		}
 		
 		System.out.println();
