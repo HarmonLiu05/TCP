@@ -1,5 +1,5 @@
-/***************************2.1: ACK/NACK
-**************************** Feng Hong; 2015-12-09*/
+/***************************2.2: 重复ACK（不使用NACK）
+**************************** Modified for RDT 2.2*/
 
 package com.ouc.tcp.test;
 
@@ -13,6 +13,7 @@ public class TCP_Sender extends TCP_Sender_ADT {
 	
 	private TCP_PACKET tcpPack;	//待发送的TCP数据报
 	private volatile int flag = 0;
+	private int lastAckReceived = 0;  // 记录上一次收到的ACK号（用于检测重复ACK）
 	
 	/*构造函数*/
 	public TCP_Sender() {
@@ -46,7 +47,7 @@ public class TCP_Sender extends TCP_Sender_ADT {
 	public void udt_send(TCP_PACKET stcpPack) {
 		//设置错误控制标志
 		// eflag=0: 无差错; eflag=1: 只出错; eflag=2: 只丢包; eflag=3: 只延迟
-		// 为了测试RDT2.0，设置为1（只出错）
+		// 为了测试RDT2.2，设置为1（只出错）
 		tcpH.setTh_eflag((byte)1);		
 		//System.out.println("to send: "+stcpPack.getTcpH().getTh_seq());				
 		//发送数据报
@@ -74,25 +75,34 @@ public class TCP_Sender extends TCP_Sender_ADT {
 	}
 
 	@Override
-	//接收到ACK报文：检查校验和，将确认号插入ack队列;NACK的确认号为－1；不需要修改
+	//接收到ACK报文：RDT2.2 通过检测重复ACK来判断错误
 	public void recv(TCP_PACKET recvPack) {
-		System.out.println("Receive ACK Number： "+ recvPack.getTcpH().getTh_ack());
-		// 检查eflag：如果是1（错误），立即重传
-		if (recvPack.getTcpH().getTh_eflag() == 1) {
-			System.out.println("Receive NACK: eflag=1, need retransmit");
-			// NACK，立即重传
-			System.out.println("Retransmit: "+tcpPack.getTcpH().getTh_seq());
-			udt_send(tcpPack);
-		} else if (recvPack.getTcpH().getTh_ack() == tcpPack.getTcpH().getTh_seq()) {
-			// 收到正确ACK，发送下一包
-			System.out.println("Clear: "+tcpPack.getTcpH().getTh_seq());
-			flag = 1;
+		int receivedAck = recvPack.getTcpH().getTh_ack();
+		int currentSeq = tcpPack.getTcpH().getTh_seq();
+			
+		System.out.println("Receive ACK Number： " + receivedAck + " (Current seq: " + currentSeq + ")");
+			
+		//RDT 2.2 核心逻辑：检测重复ACK
+		if (receivedAck == currentSeq) {
+			// 情况1：收到正确ACK，确认号与当前发送序号匹配
+			System.out.println("RDT2.2 - Correct ACK, Clear: " + currentSeq);
+			lastAckReceived = receivedAck;  // 更新上次ACK
+			flag = 1;  // 设置标志，允许发送下一包
+		} else if (receivedAck == lastAckReceived && receivedAck != 0) {
+			// 情况2：RDT 2.2 重复ACK → 说明当前包出错，需要重传
+			System.out.println("RDT2.2 - Duplicate ACK detected (ACK=" + receivedAck + "), Retransmit: " + currentSeq);
+			udt_send(tcpPack);  // 重传当前包
+		} else if (receivedAck < currentSeq) {
+			// 情况3：收到旧的ACK（可能是第一次收到的重复ACK）
+			System.out.println("RDT2.2 - Old ACK (ACK=" + receivedAck + " < seq=" + currentSeq + "), Retransmit: " + currentSeq);
+			lastAckReceived = receivedAck;  // 记录这个ACK，下次如果重复就能检测到
+			udt_send(tcpPack);  // 重传
 		} else {
-			// 收到错误的ACK号，重传
-			System.out.println("Retransmit: "+tcpPack.getTcpH().getTh_seq());
+			// 惄况4：其他错误情况
+			System.out.println("RDT2.2 - Unexpected ACK, Retransmit: " + currentSeq);
 			udt_send(tcpPack);
 		}
-	    System.out.println();
+		System.out.println();
 	}
 	
 }
