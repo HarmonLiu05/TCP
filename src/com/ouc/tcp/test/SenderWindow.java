@@ -6,13 +6,13 @@ import com.ouc.tcp.client.UDT_RetransTask;
 import com.ouc.tcp.message.TCP_PACKET;
 
 /**
- * 发送方窗口管理类 - GBN协议
+ * 发送方窗口管理类 - TCP协议
  * 使用数组实现的循环队列管理发送缓冲区
- * GBN关键：单一定时器 + 累积确认 + 超时重传所有
+ * TCP协议：GBN发送端逻辑 - 单一定时器 + 累积确认 + 超时重传所有
  */
 public class SenderWindow {
     // 窗口数组：使用数组实现循环队列
-    private WindowElem[] window;  // GBN不需要每个元素都有定时器，使用基类WindowElem
+    private WindowElem[] window;  // TCP使用GBN的逻辑，不需要每个元素都有定时器
     // 窗口大小
     private int size;
     // 窗口基序号：最早未确认的包的序列号
@@ -38,13 +38,13 @@ public class SenderWindow {
      */
     public SenderWindow(int size, Client client, TCP_Sender sender) {
         this.size = size;
-        this.window = new WindowElem[size];  // GBN使用WindowElem，不需要每个包的定时器
+        this.window = new WindowElem[size];  // TCP使用GBN逻辑，基类WindowElem
         this.base = 0;
         this.nextToSend = 0;
         this.rear = 0;
         this.client = client;
         this.sender = sender;
-        this.baseTimer = null;  // GBN单一定时器
+        this.baseTimer = null;  // TCP使用GBN的单一定时器
         
         // 初始化窗口数组
         for (int i = 0; i < size; i++) {
@@ -79,13 +79,13 @@ public class SenderWindow {
         window[idx].setFlag(WindowElem.NOT_ACKED);
         rear++;
         
-        System.out.println("GBN入窗 - seq=" + packet.getTcpH().getTh_seq() + 
+        System.out.println("TCP入窗 - seq=" + packet.getTcpH().getTh_seq() + 
                          " (rear=" + rear + ")");
     }
     
     /**
      * 发送数据包并启动/重启定时器
-     * GBN关键：只有一个全局定时器，用于最早的未确认包
+     * TCP关键：GBN逻辑 - 只有一个全局定时器，用于最早的未确认包
      * @param sender 发送方对象（用于访问 udt_send）
      */
     public void sendPacket(TCP_Sender sender) {
@@ -96,13 +96,13 @@ public class SenderWindow {
             // 发送数据包
             sender.udt_send(packet);
             
-            System.out.println("GBN发送 - seq=" + packet.getTcpH().getTh_seq() + 
+            System.out.println("TCP发送 - seq=" + packet.getTcpH().getTh_seq() + 
                              " (base=" + base + ", nextToSend=" + nextToSend + ", rear=" + rear + ")");
             
             // 移动 nextToSend 指针
             nextToSend++;
             
-            // GBN关键：定时器管理
+            // TCP关键：GBN定时器管理
             // 如果是窗口从空变为非空（即base位置的包被发送），启动定时器
             if (base == nextToSend - 1) {  // 刚才发送的是base位置的包
                 startTimer();
@@ -111,8 +111,8 @@ public class SenderWindow {
     }
     
     /**
-     * 启动全局定时器
-     * GBN关键：只有一个定时器，用于base位置
+     * 启动全局定时器 - TCP使用GBN逻辑
+     * 只有一个定时器，用于base位置
      */
     private void startTimer() {
         // 先停止旧的定时器
@@ -127,7 +127,7 @@ public class SenderWindow {
             }
         }, TIMEOUT_MS);
         
-        System.out.println("GBN启动定时器 - base=" + base);
+        System.out.println("TCP启动定时器 - base=" + base);
     }
     
     /**
@@ -138,45 +138,53 @@ public class SenderWindow {
             baseTimer.cancel();
             baseTimer.purge();
             baseTimer = null;
-            System.out.println("GBN停止定时器");
+            System.out.println("TCP停止定时器");
         }
     }
     
     /**
-     * 超时处理：GBN关键 - 重传所有未确认的包
+     * 超时处理：TCP使用GBN逻辑 - 重传所有未确认的包
      */
     private void onTimeout() {
-        System.out.println("\n!!! GBN超时 - 重传窗口内所有包 [" + base + "," + nextToSend + ") !!!");
+        System.out.println("\n!!! TCP超时 - 重传窗口内所有包 [" + base + "," + nextToSend + ") !!!");
         
-        // 重传所有已发送但未确认的包
+        // 1. 重传所有已发送但未确认的包
         for (int i = base; i < nextToSend; i++) {
             int idx = getIdx(i);
             TCP_PACKET packet = window[idx].getPacket();
             if (packet != null) {
                 sender.udt_send(packet);
-                System.out.println("GBN重传 - seq=" + packet.getTcpH().getTh_seq());
+                System.out.println("TCP重传 - seq=" + packet.getTcpH().getTh_seq());
             }
         }
         
-        // 重启定时器
-        startTimer();
+        // 2. Bug修复：只有当窗口非空（还有未确认的包）时，才重启定时器
+        // 防止窗口已空但定时器仍在运行导致的死循环
+        if (base < rear) {
+            startTimer();
+            System.out.println("TCP启动定时器 - base=" + base);
+        } else {
+            // 窗口已空，停止定时器
+            stopTimer();
+            System.out.println("TCP窗口已空 - 停止定时器");
+        }
     }
     /**
-     * 处理 ACK - GBN关键：累积确认
+     * 处理 ACK - TCP关键：GBN的累积确认
      * 收到ACK n，表示 n 及之前的所有包都已确认
      * @param seq 收到的 ACK 序列号
      */
     public void ackPacket(int seq) {
-        System.out.println("\n=== GBN处理ACK - seq=" + seq + " (base=" + base + ", rear=" + rear + ") ===");
+        System.out.println("\n=== TCP处理ACK - seq=" + seq + " (base=" + base + ", rear=" + rear + ") ===");
         
-        // GBN累积确认：ACK n 表示 n 及之前的所有包都已确认
+        // TCP累积确认（GBN逻辑）：ACK n 表示 n 及之前的所有包都已确认
         if (seq >= base && seq < rear) {
             // 标记所有 <= seq 的包为已确认
             for (int i = base; i <= seq && i < rear; i++) {
                 int idx = getIdx(i);
                 if (!window[idx].isAcked()) {
                     window[idx].setFlag(WindowElem.ACKED);
-                    System.out.println("  >>> GBN确认 - seq=" + i + " (idx=" + idx + ") <<<");
+                    System.out.println("  >>> TCP确认 - seq=" + i + " (idx=" + idx + ") <<<");
                 }
             }
             
@@ -184,16 +192,16 @@ public class SenderWindow {
             slideWindow();
             
         } else if (seq < base) {
-            System.out.println("  GBN重复ACK - seq=" + seq + " < base=" + base + " (已确认过)");
+            System.out.println("  TCP重复ACK - seq=" + seq + " < base=" + base + " (已确认过)");
         } else {
-            System.out.println("  GBN警告 - seq=" + seq + " 不在窗口内 [" + base + "," + rear + ")");
+            System.out.println("  TCP警告 - seq=" + seq + " 不在窗口内 [" + base + "," + rear + ")");
         }
         
         System.out.println("=== ACK处理完成 ===\n");
     }
     
     /**
-     * 滑动窗口 - GBN关键：累积滑动
+     * 滑动窗口 - TCP关键：GBN的累积滑动
      * 从 base 开始，连续滑动所有已确认的包
      */
     private void slideWindow() {
@@ -217,14 +225,14 @@ public class SenderWindow {
         }
         
         if (slideCount > 0) {
-            System.out.println("GBN窗口滑动 - 从 base=" + oldBase + " 滑动到 " + base + 
+            System.out.println("TCP窗口滑动 - 从 base=" + oldBase + " 滑动到 " + base + 
                              " (滑动" + slideCount + "个包)");
             
-            // GBN关键：窗口滑动后的定时器管理
+            // TCP关键：GBN的窗口滑动后定时器管理
             if (base == rear) {
                 // 窗口已空，停止定时器
                 stopTimer();
-                System.out.println("GBN窗口已空 - 停止定时器");
+                System.out.println("TCP窗口已空 - 停止定时器");
             } else {
                 // 窗口仍有未确认的包，重启定时器
                 startTimer();

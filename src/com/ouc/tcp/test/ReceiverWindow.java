@@ -3,9 +3,9 @@ package com.ouc.tcp.test;
 import com.ouc.tcp.message.TCP_PACKET;
 
 /**
- * 接收方窗口管理类
+ * 接收方窗口管理类 - TCP协议
  * 使用数组实现的循环队列管理接收缓冲区
- * 参考实验报告 P14-15
+ * TCP协议：SR的缓存能力 + GBN的累积确认
  */
 public class ReceiverWindow {
     // 窗口数组：使用数组实现循环队列
@@ -47,8 +47,7 @@ public class ReceiverWindow {
     }
     
     /**
-     * 缓存数据包
-     * 参考实验报告 P14-15 - bufferPacket 方法
+     * 缓存数据包 - TCP协议
      * @param packet 收到的数据包
      * @return 状态码：UNORDERED/DUPLICATE/IS_BASE/ORDERED
      */
@@ -57,13 +56,13 @@ public class ReceiverWindow {
         
         // 情况1：窗口之前的包（重复包）
         if (seq < base) {
-            System.out.println("SR接收 - seq=" + seq + " 是重复包（已交付），仍需回复ACK");
+            System.out.println("TCP接收窗口 - seq=" + seq + " 是重复包（已交付），仍需回复ACK");
             return DUPLICATE;
         }
         
         // 情况2：窗口之外的包（乱序太远）
         if (seq >= base + size) {
-            System.out.println("SR接收 - seq=" + seq + " 超出窗口范围 [" + base + "," + (base+size-1) + "]");
+            System.out.println("TCP接收窗口 - seq=" + seq + " 超出窗口范围 [" + base + "," + (base+size-1) + "]");
             return UNORDERED;
         }
         
@@ -74,7 +73,7 @@ public class ReceiverWindow {
         if (window[idx].isBuffered() && window[idx].getPacket() != null) {
             int cachedSeq = window[idx].getPacket().getTcpH().getTh_seq();
             if (cachedSeq == seq) {
-                System.out.println("SR接收 - seq=" + seq + " 重复接收（已在缓冲区），仍需回复ACK");
+                System.out.println("TCP接收窗口 - seq=" + seq + " 重复接收（已在缓冲区），仍需回复ACK");
                 return (seq == base) ? IS_BASE : ORDERED;
             }
         }
@@ -84,17 +83,16 @@ public class ReceiverWindow {
         window[idx].markBuffered();
         
         if (seq == base) {
-            System.out.println("SR接收 - seq=" + seq + " 是期望的包（base）");
+            System.out.println("TCP接收窗口 - seq=" + seq + " 是期望的包（base）");
             return IS_BASE;
         } else {
-            System.out.println("SR接收 - seq=" + seq + " 是乱序包（已缓存）");
+            System.out.println("TCP接收窗口 - seq=" + seq + " 是乱序包（已缓存）");
             return ORDERED;
         }
     }
     
     /**
-     * 获取可交付的数据包
-     * 参考实验报告 P15 - getPacketToDeliver 方法
+     * 获取可交付的数据包 - TCP协议
      * @return 可交付的数据包，如果没有则返回 null
      */
     public TCP_PACKET getPacketToDeliver() {
@@ -110,7 +108,7 @@ public class ReceiverWindow {
             // 滑动窗口
             base++;
             
-            System.out.println("SR交付 - seq=" + packet.getTcpH().getTh_seq() + 
+            System.out.println("TCP交付 - seq=" + packet.getTcpH().getTh_seq() + 
                              " (新base=" + base + ")");
             
             return packet;

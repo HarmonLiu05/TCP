@@ -1,5 +1,5 @@
-/***************************GBN: 回退N步协议
-**************************** 标准GBN实现：单一定时器+累积确认+重传所有 */
+/***************************TCP: 基础TCP协议（无拥塞控制）
+**************************** GBN发送端：单一定时器+累积确认+重传所有 */
 
 package com.ouc.tcp.test;
 
@@ -8,7 +8,7 @@ import com.ouc.tcp.message.*;
 
 public class TCP_Sender extends TCP_Sender_ADT {
 	
-	// GBN协议发送窗口：管理所有未确认的数据包
+	// TCP协议发送窗口：GBN的发送端逻辑
 	private SenderWindow senderWindow;
 	// 窗口容量：同时允许多少个未确认的包在网络中传输
 	private static final int WINDOW_SIZE = 10;
@@ -17,16 +17,16 @@ public class TCP_Sender extends TCP_Sender_ADT {
 	public TCP_Sender() {
 		super();
 		super.initTCP_Sender(this);
-		// GBN协议初始化：创建发送窗口，使用单一定时器
+		// TCP协议初始化：创建发送窗口，使用GBN的单一定时器
 		senderWindow = new SenderWindow(WINDOW_SIZE, client, this);
-		System.out.println("GBN协议启动 - 窗口大小=" + WINDOW_SIZE);
+		System.out.println("TCP协议发送端启动 - 窗口大小=" + WINDOW_SIZE + ", GBN发送端逻辑");
 	}
 	
 	@Override
-	// GBN协议发送方法
+	// TCP协议发送方法（GBN发送端）
 	public void rdt_send(int dataIndex, int[] appData) {
 		
-		// GBN协议流控：窗口满时自旋等待
+		// TCP协议流控：窗口满时自旋等待
 		while (senderWindow.isFull()) {
 			// 窗口满时，处理ACK来释放空间
 			waitACK();
@@ -55,14 +55,14 @@ public class TCP_Sender extends TCP_Sender_ADT {
 		// 调用 sendPacket 执行发送
 		senderWindow.sendPacket(this);
 		
-		// GBN协议关键：每次发送后都处理待处理的ACK
+		// TCP协议关键：每次发送后都处理待处理的ACK
 		waitACK();
 	}
 	
 	@Override
 	// 通过不可靠信道发送数据包
 	public void udt_send(TCP_PACKET stcpPack) {
-		// GBN协议测试配置：
+		// TCP协议测试配置：
 		// eflag=0 无差错（快速测试）
 		// eflag=4 出错/丢包（中等测试）
 		// eflag=7 出错/丢包/延迟（完整测试，会很慢）
@@ -71,7 +71,7 @@ public class TCP_Sender extends TCP_Sender_ADT {
 	}
 	
 	@Override
-	// GBN协议 ACK处理
+	// TCP协议 ACK处理
 	public void waitACK() {
 		// 一次性处理所有堆积的ACK，避免延迟
 		while (!ackQueue.isEmpty()) {
@@ -88,7 +88,7 @@ public class TCP_Sender extends TCP_Sender_ADT {
 		
 		System.out.println(">>> 收到ACK - seq=" + ackSeq + " <<<");
 		
-		// GBN协议关键：直接处理ACK，确保定时器被取消
+		// TCP协议关键：直接处理ACK，确保定时器被取消
 		// 不能只放入队列，因为rdt_send结束后没人调用waitACK
 		senderWindow.ackPacket(ackSeq);
 	}

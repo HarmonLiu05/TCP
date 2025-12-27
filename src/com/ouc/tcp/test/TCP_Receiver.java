@@ -1,5 +1,5 @@
-/***************************GBN: 回退N步协议*****************/
-/***** 标准GBN实现：接收方不缓存乱序包 ******************************/
+/***************************TCP: 基础TCP协议（无拥塞控制）*****************/
+/***** GBN发送端 + SR接收端（带缓存+累积确认+Delayed ACK） ******************************/
 package com.ouc.tcp.test;
 
 import java.io.BufferedWriter;
@@ -9,79 +9,90 @@ import java.io.IOException;
 
 import com.ouc.tcp.client.TCP_Receiver_ADT;
 import com.ouc.tcp.message.*;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.net.InetAddress;
 
 public class TCP_Receiver extends TCP_Receiver_ADT {
 	
 	private TCP_PACKET ackPack;	// ACK报文
-	// GBN协议：接收方只维护期望序号，不需要窗口缓存
-	private int expectedSeq;  // 期望接收的下一个序列号
-	private int lastAckSeq;   // 上一个成功接收的序号（用于重发ACK）
+	// TCP协议：SR的缓存能力 + GBN的累积确认
+	private ReceiverWindow receiverWindow;  // 接收窗口（缓存乱序包）
+	private static final int WINDOW_SIZE = 10;
+	
+	// Delayed ACK机制
+	private Timer delayedAckTimer;  // 延迟ACK定时器
+	private static final long DELAYED_ACK_TIMEOUT = 500;  // 500ms延迟
+	private int pendingAckSeq = -1;  // 待发送的ACK序号
 	
 	/*构造函数*/
 	public TCP_Receiver() {
 		super();
 		super.initTCP_Receiver(this);
-		// GBN协议初始化：从序列号0开始期望接收
-		expectedSeq = 0;
-		lastAckSeq = -1;  // 初始时没有已确认的包
-		System.out.println("GBN协议接收端启动 - 期望序号=" + expectedSeq);
+		// TCP协议初始化：创建接收窗口（SR的缓存能力）
+		receiverWindow = new ReceiverWindow(WINDOW_SIZE, 0);
+		delayedAckTimer = null;
+		System.out.println("TCP协议接收端启动 - 窗口大小=" + WINDOW_SIZE + ", 支持Delayed ACK");
 	}
 
 	@Override
-	// GBN协议接收方法：只接收期望序号的包，丢弃乱序包
+	// TCP协议接收方法：SR缓存 + GBN累积确认 + Delayed ACK
 	public void rdt_recv(TCP_PACKET recvPack) {
 		// 步骤1：校验数据完整性
 		if (CheckSum.computeChkSum(recvPack) == recvPack.getTcpH().getTh_sum()) {
 			// 数据没有损坏
 			int seq = recvPack.getTcpH().getTh_seq();
 			
-			// GBN核心逻辑：判断是否为期望的包
-			if (seq == expectedSeq) {
-				// ===== 情况1：收到期望的包 =====
-				System.out.println("GBN接收 - seq=" + seq + " 是期望的包");
+			// TCP协议核心：使用SR的缓存机制
+			int result = receiverWindow.bufferPacket(recvPack);
+			
+			if (result == ReceiverWindow.IS_BASE) {
+				// ===== 情况1：收到期望的包（按序到达）=====
+				System.out.println("TCP接收 - seq=" + seq + " 是期望的包（按序）");
 				
-				// 交付数据到应用层
-				dataQueue.add(recvPack.getTcpS().getData());
-				
-				// 回复ACK（累积确认）
-				tcpH.setTh_ack(seq);
-				ackPack = new TCP_PACKET(tcpH, tcpS, recvPack.getSourceAddr());
-				tcpH.setTh_sum(CheckSum.computeChkSum(ackPack));
-				tcpH.setTh_eflag((byte)0);  // ACK包不模拟错误
-				reply(ackPack);
-				
-				System.out.println("回复ACK - seq=" + seq);
-				
-				// 更新期望序号和最后确认序号
-				lastAckSeq = seq;
-				expectedSeq++;
-				System.out.println("GBN窗口移动 - 新期望序号=" + expectedSeq);
-				
-			} else {
-				// ===== 情况2：收到乱序包或重复包 =====
-				if (seq < expectedSeq) {
-					// 重复包（已经交付过的包）
-					System.out.println("GBN接收 - seq=" + seq + " 是重复包（期望=" + expectedSeq + "）");
-				} else {
-					// 乱序包（超前的包）- GBN直接丢弃
-					System.out.println("GBN丢弃 - seq=" + seq + " 是乱序包（期望=" + expectedSeq + "）");
+				// 交付该包及所有连续缓存的包
+				TCP_PACKET deliverablePacket;
+				while ((deliverablePacket = receiverWindow.getPacketToDeliver()) != null) {
+					dataQueue.add(deliverablePacket.getTcpS().getData());
 				}
 				
-				// GBN关键：重发最近一次成功接收的ACK
-				if (lastAckSeq >= 0) {
-					tcpH.setTh_ack(lastAckSeq);
-					ackPack = new TCP_PACKET(tcpH, tcpS, recvPack.getSourceAddr());
-					tcpH.setTh_sum(CheckSum.computeChkSum(ackPack));
-					tcpH.setTh_eflag((byte)0);
-					reply(ackPack);
-					System.out.println("重发ACK - seq=" + lastAckSeq + " (期望=" + expectedSeq + ")");
-				} else {
-					System.out.println("未回复ACK - 因为还没有成功接收过任何包");
+				// TCP Delayed ACK：按序包启动延迟ACK（500ms后发送）
+				int ackSeq = receiverWindow.getBase() - 1;  // 累积确认：base-1
+				scheduleDelayedAck(ackSeq, recvPack.getSourceAddr());
+				System.out.println("TCP Delayed ACK - 将在500ms后回复ACK=" + ackSeq);
+				
+			} else if (result == ReceiverWindow.ORDERED) {
+				// ===== 情况2：乱序包（窗口内）- 缓存并立即发送Duplicate ACK =====
+				System.out.println("TCP接收 - seq=" + seq + " 是乱序包（已缓存）");
+				
+				// 取消延迟ACK，立即发送重复ACK
+				cancelDelayedAck();
+				
+				// 立即回复Duplicate ACK（累积确认：base-1）
+				int dupAckSeq = receiverWindow.getBase() - 1;
+				if (dupAckSeq >= 0) {
+					sendAck(dupAckSeq, recvPack.getSourceAddr());
+					System.out.println("TCP立即发送Duplicate ACK=" + dupAckSeq + " (乱序触发)");
 				}
+				
+			} else if (result == ReceiverWindow.DUPLICATE) {
+				// ===== 情况3：重复包（base之前）- 立即重发ACK =====
+				System.out.println("TCP接收 - seq=" + seq + " 是重复包（已交付）");
+				
+				// 立即重发ACK
+				int dupAckSeq = receiverWindow.getBase() - 1;
+				if (dupAckSeq >= 0) {
+					sendAck(dupAckSeq, recvPack.getSourceAddr());
+					System.out.println("TCP重发ACK=" + dupAckSeq + " (重复包触发)");
+				}
+				
+			} else if (result == ReceiverWindow.UNORDERED) {
+				// ===== 情况4：窗口外的包 - 丢弃 =====
+				System.out.println("TCP丢弃 - seq=" + seq + " 超出窗口范围");
 			}
 			
 		} else {
-			// 数据损坏：GBN直接丢弃，不回复ACK
+			// 数据损坏：直接丢弃，不回复ACK
 			// 发送方的超时定时器会触发重传
 			System.out.println("校验失败 - seq=" + recvPack.getTcpH().getTh_seq());
 			System.out.println("计算值=" + CheckSum.computeChkSum(recvPack) + ", 接收值=" + recvPack.getTcpH().getTh_sum());
@@ -93,6 +104,50 @@ public class TCP_Receiver extends TCP_Receiver_ADT {
 		if (dataQueue.size() >= 20) {
 			deliver_data();
 		}
+	}
+	
+	/**
+	 * TCP Delayed ACK机制：延迟500ms发送ACK
+	 * 如果期间有反向数据可捎带，则取消此定时器
+	 */
+	private void scheduleDelayedAck(final int ackSeq, final InetAddress destAddr) {
+		// 取消之前的延迟ACK
+		cancelDelayedAck();
+		
+		// 启动新的延迟ACK定时器
+		pendingAckSeq = ackSeq;
+		delayedAckTimer = new Timer();
+		delayedAckTimer.schedule(new TimerTask() {
+			@Override
+			public void run() {
+				// 500ms后发送ACK
+				sendAck(ackSeq, destAddr);
+				System.out.println("TCP Delayed ACK触发 - 发送ACK=" + ackSeq);
+				pendingAckSeq = -1;
+			}
+		}, DELAYED_ACK_TIMEOUT);
+	}
+	
+	/**
+	 * 取消延迟ACK定时器
+	 */
+	private void cancelDelayedAck() {
+		if (delayedAckTimer != null) {
+			delayedAckTimer.cancel();
+			delayedAckTimer.purge();
+			delayedAckTimer = null;
+		}
+	}
+	
+	/**
+	 * 发送ACK（累积确认）
+	 */
+	private void sendAck(int ackSeq, InetAddress destAddr) {
+		tcpH.setTh_ack(ackSeq);
+		ackPack = new TCP_PACKET(tcpH, tcpS, destAddr);
+		tcpH.setTh_sum(CheckSum.computeChkSum(ackPack));
+		tcpH.setTh_eflag((byte)0);  // ACK包不模拟错误
+		reply(ackPack);
 	}
 
 	@Override
