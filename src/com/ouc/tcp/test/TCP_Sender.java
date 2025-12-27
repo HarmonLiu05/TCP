@@ -1,120 +1,97 @@
-/***************************3.0: 超时重传（处理丢包）
-**************************** Modified for RDT 3.0 */
+/***************************SR: 选择重传协议
+**************************** 参考实验报告 P10-12
+**************************** 使用数组实现的循环队列 */
 
 package com.ouc.tcp.test;
 
 import com.ouc.tcp.client.TCP_Sender_ADT;
-import com.ouc.tcp.client.UDT_RetransTask;
-import com.ouc.tcp.client.UDT_Timer;
 import com.ouc.tcp.message.*;
-import com.ouc.tcp.tool.TCP_TOOL;
 
 public class TCP_Sender extends TCP_Sender_ADT {
 	
-	private TCP_PACKET tcpPack;	//待发送的TCP数据报
-	private volatile int flag = 0;
-	private UDT_Timer timer;	//RDT 3.0: 超时重传定时器
-	private int lastAckReceived = 0;  // 记录上一次收到的ACK号
+	// SR协议发送窗口：管理所有未确认的数据包
+	private SenderWindow senderWindow;
+	// 窗口容量：同时允许多少个未确认的包在网络中传输
+	private static final int WINDOW_SIZE = 10;
 	
 	/*构造函数*/
 	public TCP_Sender() {
-		super();	//调用超类构造函数
-		super.initTCP_Sender(this);		//初始化TCP发送端
+		super();
+		super.initTCP_Sender(this);
+		// SR协议初始化：创建发送窗口，使用数组循环队列
+		senderWindow = new SenderWindow(WINDOW_SIZE, client);
+		System.out.println("SR协议启动 - 窗口大小=" + WINDOW_SIZE);
 	}
 	
 	@Override
-	//可靠发送（应用层调用）：封装应用层数据，产生TCP数据报
+	// SR协议发送方法：参考实验报告 P12
 	public void rdt_send(int dataIndex, int[] appData) {
 		
-		//生成TCP数据报（设置序号和数据字段/校验和),注意打包的顺序
-		tcpH.setTh_seq(dataIndex * appData.length + 1);//包序号设置为字节流号：
+		// SR协议流控：窗口满时自旋等待
+		while (senderWindow.isFull()) {
+			// 窗口满时，处理ACK来释放空间
+			waitACK();
+			Thread.yield();  // 让出CPU，让ACK处理线程有机会运行
+		}
+		
+		// 获取下一个序列号
+		int currentSeq = senderWindow.getNextSeq();
+		
+		// 封装TCP数据包
+		tcpH.setTh_seq(currentSeq);
 		tcpS.setData(appData);
-		tcpPack = new TCP_PACKET(tcpH, tcpS, destinAddr);		
-		//更新带有checksum的TCP 报文头		
+		TCP_PACKET tcpPack = new TCP_PACKET(tcpH, tcpS, destinAddr);
+		
+		// 计算校验和
 		tcpH.setTh_sum(CheckSum.computeChkSum(tcpPack));
 		tcpPack.setTcpH(tcpH);
 		
-		//发送TCP数据报
-		udt_send(tcpPack);
-		flag = 0;
+		// 关键：必须 clone，避免引用被后续修改
+		try {
+			senderWindow.pushPacket(tcpPack.clone());
+		} catch (CloneNotSupportedException e) {
+			e.printStackTrace();
+		}
 		
-		//RDT 3.0: 启动超时重传定时器
-		timer = new UDT_Timer();
-		timer.schedule(new UDT_RetransTask(client, tcpPack), 3000, 3000);  // 3秒超时
+		// 调用 sendPacket 执行发送
+		senderWindow.sendPacket(this);
 		
-		//等待ACK报文
-		while (flag==0);
-		
-		//RDT 3.0: 收到ACK后，停止定时器
-		timer.cancel();
+		// SR协议关键：每次发送后都处理待处理的ACK
+		waitACK();
 	}
 	
 	@Override
-	//不可靠发送：将打包好的TCP数据报通过不可靠传输信道发送
+	// 通过不可靠信道发送数据包
 	public void udt_send(TCP_PACKET stcpPack) {
-		//设置错误控制标志
-		// eflag=0: 无差错; eflag=1: 只出错; eflag=2: 只丢包; eflag=3: 只延迟
-		// RDT 3.0: 设置为2（只丢包）来测试超时重传
-		tcpH.setTh_eflag((byte)2);		
-		//System.out.println("to send: "+stcpPack.getTcpH().getTh_seq());				
-		//发送数据报
+		// SR协议测试配置：
+		// eflag=0 无差错（快速测试）
+		// eflag=4 出错/丢包（中等测试）
+		// eflag=7 出错/丢包/延迟（完整测试，会很慢）
+		tcpH.setTh_eflag((byte)7);  // 改为4，避免延迟导致过多重传
 		client.send(stcpPack);
 	}
 	
 	@Override
-	//需要修改
+	// SR协议ACK处理：参考实验报告 P12
 	public void waitACK() {
-		//循环检查ackQueue
-		//循环检查确认号对列中是否有新收到的ACK		
-		if(!ackQueue.isEmpty()){
-			int currentAck=ackQueue.poll();
-			// System.out.println("CurrentAck: "+currentAck);
-			if (currentAck == tcpPack.getTcpH().getTh_seq()){
-				System.out.println("Clear: "+tcpPack.getTcpH().getTh_seq());
-				flag = 1;
-				//break;
-			}else{
-				System.out.println("Retransmit: "+tcpPack.getTcpH().getTh_seq());
-				udt_send(tcpPack);
-				flag = 0;
-			}
+		// 一次性处理所有堆积的ACK，避免延迟
+		while (!ackQueue.isEmpty()) {
+			int ackSeq = ackQueue.poll();
+			// 调用窗口的 ackPacket 方法
+			senderWindow.ackPacket(ackSeq);
 		}
 	}
 
 	@Override
-	//接收到ACK报文：RDT 3.0 处理ACK，包括重复ACK检测
+	// 接收ACK报文：底层框架收到ACK后会回调此方法
 	public void recv(TCP_PACKET recvPack) {
-		int receivedAck = recvPack.getTcpH().getTh_ack();
-		int currentSeq = tcpPack.getTcpH().getTh_seq();
+		int ackSeq = recvPack.getTcpH().getTh_ack();
 		
-		System.out.println("RDT3.0 - Receive ACK: " + receivedAck + " (Current seq: " + currentSeq + ")");
+		System.out.println(">>> 收到ACK - seq=" + ackSeq + " <<<");
 		
-		// RDT 3.0: 检查收到的ACK
-		if (receivedAck == currentSeq) {
-			// 情况1：收到正确ACK，确认号与当前发送序号匹配
-			System.out.println("RDT3.0 - Correct ACK, Clear: " + currentSeq);
-			lastAckReceived = receivedAck;
-			
-			//RDT 3.0: 停止定时器
-			if (timer != null) {
-				timer.cancel();
-			}
-			
-			flag = 1;  // 允许发送下一包
-		} else if (receivedAck == lastAckReceived && receivedAck != 0) {
-			// 情况2：收到重复ACK（可能是之前包的ACK）
-			System.out.println("RDT3.0 - Duplicate ACK (ACK=" + receivedAck + "), ignore");
-			// 不做处理，等待超时重传
-		} else if (receivedAck < currentSeq) {
-			// 情况3：收到旧的ACK
-			System.out.println("RDT3.0 - Old ACK (ACK=" + receivedAck + " < seq=" + currentSeq + "), ignore");
-			lastAckReceived = receivedAck;
-			// 不做处理，等待超时重传
-		} else {
-			// 情况4：其他情况
-			System.out.println("RDT3.0 - Unexpected ACK, ignore");
-		}
-		System.out.println();
+		// SR协议关键：直接处理ACK，确保定时器被取消
+		// 不能只放入队列，因为rdt_send结束后没人调用waitACK
+		senderWindow.ackPacket(ackSeq);
 	}
 	
 }

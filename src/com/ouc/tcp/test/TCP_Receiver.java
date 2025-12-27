@@ -1,5 +1,6 @@
-/***************************3.0: 超时重传（处理丢包）*****************/
-/***** Modified for RDT 3.0 ******************************/
+/***************************SR: 选择重传协议*****************/
+/***** 参考实验报告 P15-16 ******************************/
+/***** 使用数组实现的循环队列 ******************************/
 package com.ouc.tcp.test;
 
 import java.io.BufferedWriter;
@@ -9,66 +10,73 @@ import java.io.IOException;
 
 import com.ouc.tcp.client.TCP_Receiver_ADT;
 import com.ouc.tcp.message.*;
-import com.ouc.tcp.tool.TCP_TOOL;
 
 public class TCP_Receiver extends TCP_Receiver_ADT {
 	
-	private TCP_PACKET ackPack;	//回复的ACK报文段
-	int sequence=1;//用于记录当前待接收的包序号
-	int lastCorrectSeq = 0; //RDT 3.0: 记录上一个正确接收的包序号
-		
+	private TCP_PACKET ackPack;	// ACK报文
+	// SR协议接收窗口：用数组存储乱序到达的数据包
+	private ReceiverWindow receiverWindow;
+	// 窗口大小：与发送方保持一致
+	private static final int WINDOW_SIZE = 10;
+	
 	/*构造函数*/
 	public TCP_Receiver() {
-		super();	//调用超类构造函数
-		super.initTCP_Receiver(this);	//初始化TCP接收端
+		super();
+		super.initTCP_Receiver(this);
+		// SR协议初始化：创建接收窗口，从序列号0开始接收
+		receiverWindow = new ReceiverWindow(WINDOW_SIZE, 0);
+		System.out.println("SR协议接收端启动 - 窗口大小=" + WINDOW_SIZE);
 	}
 
 	@Override
-	//接收到数据报：检查校验和，设置回复的ACK报文段
+	// SR协议接收方法：参考实验报告 P15-16
 	public void rdt_recv(TCP_PACKET recvPack) {
-		//RDT 3.0: 检查校验码，生成ACK
-		if(CheckSum.computeChkSum(recvPack) == recvPack.getTcpH().getTh_sum()) {
-			//数据包正确，生成ACK报文段
-			tcpH.setTh_ack(recvPack.getTcpH().getTh_seq());
-			ackPack = new TCP_PACKET(tcpH, tcpS, recvPack.getSourceAddr());
-			tcpH.setTh_sum(CheckSum.computeChkSum(ackPack));
-			//设置错误控制标志为0（数据无错误）
-			tcpH.setTh_eflag((byte)0);
-			//回复ACK报文段
-			reply(ackPack);
+		// 步骤1：校验数据完整性
+		if (CheckSum.computeChkSum(recvPack) == recvPack.getTcpH().getTh_sum()) {
+			// 数据没有损坏
+			int seq = recvPack.getTcpH().getTh_seq();
 			
-			//RDT 3.0: 更新上一个正确接收的包序号
-			lastCorrectSeq = recvPack.getTcpH().getTh_seq();
+			// 步骤2：SR协议关键：尝试缓存该包（支持乱序接收）
+			int result = receiverWindow.bufferPacket(recvPack);
 			
-			//将接收到的正确有序的数据插入data队列，准备交付
-			dataQueue.add(recvPack.getTcpS().getData());				
-			sequence++;
+			// 步骤3：SR协议核心特性：独立确认
+			// 只要收到校验和正确的包，都回复ACK（包括重复包）
+			// 注意：即使是UNORDERED包，根据实验报告，也需要回复ACK
+			if (result != ReceiverWindow.UNORDERED) {
+				// 构造ACK报文，确认号等于收到的包的序列号
+				tcpH.setTh_ack(seq);
+				ackPack = new TCP_PACKET(tcpH, tcpS, recvPack.getSourceAddr());
+				tcpH.setTh_sum(CheckSum.computeChkSum(ackPack));
+				tcpH.setTh_eflag((byte)0);  // ACK包不模拟错误
+				reply(ackPack);
+				
+				System.out.println("回复ACK - seq=" + seq);
+			}
 			
-			System.out.println("RDT3.0 - ACK for seq: " + recvPack.getTcpH().getTh_seq());
-		}else{
-			//RDT 3.0: 数据包损坏，发送上一个正确接收的包的ACK（重复ACK）
-			System.out.println("Recieve Computed: "+CheckSum.computeChkSum(recvPack));
-			System.out.println("Recieved Packet: "+recvPack.getTcpH().getTh_sum());
-			System.out.println("Problem: Packet Number: "+recvPack.getTcpH().getTh_seq()+" + InnerSeq: "+sequence);
+			// 步骤4：SR协议交付机制：尝试交付所有连续可交付的包
+			// 这保证了向应用层交付的数据是按序的
+			if (result == ReceiverWindow.IS_BASE) {
+				// 只有当收到base位置的包时，才尝试交付
+				TCP_PACKET deliverablePacket;
+				while ((deliverablePacket = receiverWindow.getPacketToDeliver()) != null) {
+					// 从缓冲区取出连续的包，加入交付队列
+					dataQueue.add(deliverablePacket.getTcpS().getData());
+				}
+			}
 			
-			//RDT 3.0: 不使用NACK，发送上一个正确的ACK（重复ACK）
-			tcpH.setTh_ack(lastCorrectSeq);
-			ackPack = new TCP_PACKET(tcpH, tcpS, recvPack.getSourceAddr());
-			tcpH.setTh_sum(CheckSum.computeChkSum(ackPack));
-			//ACK包设置为0
-			tcpH.setTh_eflag((byte)0);
-			//回复重复ACK
-			reply(ackPack);
-			
-			System.out.println("RDT3.0 - Duplicate ACK for seq: " + lastCorrectSeq);
+		} else {
+			// 数据损坏：SR协议直接丢弃，不回复ACK
+			// 发送方的超时定时器会触发重传
+			System.out.println("校验失败 - seq=" + recvPack.getTcpH().getTh_seq());
+			System.out.println("计算值=" + CheckSum.computeChkSum(recvPack) + ", 接收值=" + recvPack.getTcpH().getTh_sum());
 		}
 		
 		System.out.println();
 		
-		
-		//交付数据（每20组数据交付一次）
-		if(dataQueue.size() == 20) 
-			deliver_data();	
+		// 定期将累积的数据写入文件
+		if (dataQueue.size() >= 20) {
+			deliver_data();
+		}
 	}
 
 	@Override
