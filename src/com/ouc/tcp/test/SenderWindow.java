@@ -7,9 +7,9 @@ import java.util.LinkedList;
 import java.util.Iterator;
 
 /**
- * 发送方窗口管理类 - TCP Tahoe协议
+ * 发送方窗口管理类 - TCP Reno协议
  * 使用LinkedList动态数据结构（老师要求：禁止静态数组）
- * 实现完整的拥塞控制：慢开始、拥塞避免、快重传、超时重传
+ * 实现完整的拥塞控制：慢开始、拥塞避免、快重传、快恢复、超时重传
  */
 public class SenderWindow {
     // ===== 老师要求1：使用动态数据结构，禁止静态数组 =====
@@ -24,6 +24,9 @@ public class SenderWindow {
     // ===== 快重传相关 =====
     private int dupAckCount;       // 重复ACK计数
     private int lastAckSeq;        // 上一次收到的ACK序号
+    
+    // ===== TCP Reno特有：快恢复状态 =====
+    private boolean isFastRecovery;  // 是否处于快恢复状态
     
     // ===== 序列号管理 =====
     private int nextSeqNum;        // 下一个要分配的序列号
@@ -49,6 +52,7 @@ public class SenderWindow {
         // 初始化快重传
         this.dupAckCount = 0;
         this.lastAckSeq = -1;
+        this.isFastRecovery = false;  // 初始不在快恢复状态
         
         // 初始化序列号
         this.nextSeqNum = 0;
@@ -61,7 +65,7 @@ public class SenderWindow {
         // 记录启动时间
         this.startTime = System.currentTimeMillis();
         
-        System.out.println("TCP Tahoe启动 - cwnd=" + cwnd + ", ssthresh=" + ssthresh);
+        System.out.println("TCP Reno启动 - cwnd=" + cwnd + ", ssthresh=" + ssthresh);
         logCwndChange();  // 记录初始状态
     }
     
@@ -141,17 +145,18 @@ public class SenderWindow {
     
     /**
      * 超时处理 - 老师要求4：只重传队首一个包
-     * TCP Tahoe: 超时后 cwnd=1，ssthresh减半
+     * TCP Reno: 超时后 cwnd=1，ssthresh减半，退出快恢复状态
      */
     private synchronized void onTimeout() {
-        System.out.println("\n!!! TCP超时 - Tahoe协议 !!!");
+        System.out.println("\n!!! TCP超时 - Reno协议 !!!");
         
         // 步骤1：拥塞控制状态重置
         ssthresh = Math.max(2, (int)cwnd / 2);  // ssthresh = max(2, cwnd/2)
         cwnd = 1.0;                              // cwnd 重置为 1
         dupAckCount = 0;                         // 重置重复ACK计数
+        isFastRecovery = false;                  // 退出快恢复状态
         
-        System.out.println("TCP超时重置 - cwnd=" + cwnd + ", ssthresh=" + ssthresh);
+        System.out.println("TCP超时重置 - cwnd=" + cwnd + ", ssthresh=" + ssthresh + ", 退出快恢复");
         logCwndChange();  // 记录cwnd变化
         
         // 步骤2：老师要求 - 只重传窗口首个包（不是所有包）
@@ -172,11 +177,11 @@ public class SenderWindow {
         }
     }
     /**
-     * 处理 ACK - TCP Tahoe核心逻辑
-     * 老师要求2：累积确认感知 + 拥塞控制
+     * 处理 ACK - TCP Reno核心逻辑
+     * 老师要求2：累积确认感知 + 拥塞控制 + 快恢复
      */
     public synchronized void ackPacket(int ackSeq) {
-        System.out.println("\n=== TCP处理ACK - seq=" + ackSeq + " (window.size=" + window.size() + ", cwnd=" + String.format("%.2f", cwnd) + ") ===");
+        System.out.println("\n=== TCP处理ACK - seq=" + ackSeq + " (window.size=" + window.size() + ", cwnd=" + String.format("%.2f", cwnd) + ", FastRecovery=" + isFastRecovery + ") ===");
         
         // 步骤1：清理并计数 - 移除所有 seq <= ackSeq 的包
         // 关键：计数本次ACK实际移除了多少个包
@@ -196,62 +201,48 @@ public class SenderWindow {
             }
         }
         
-        // 判断是否是重复ACK
-        if (ackedCount == 0) {
-            // ===== 情况1：重复ACK - 快重传逻辑 =====
-            if (ackSeq == lastAckSeq) {
-                dupAckCount++;
-                System.out.println("  TCP重复ACK - 计数=" + dupAckCount + "/3");
-                
-                // 收到 3 个重复ACK，触发快重传
-                if (dupAckCount == 3) {
-                    System.out.println("\n!!! 快重传触发 !!!");
-                    
-                    // 拥塞控制：Tahoe特性 - ssthresh减半，cwnd重置为1
-                    ssthresh = Math.max(2, (int)cwnd / 2);
-                    cwnd = 1.0;  // Tahoe: 快重传后cwnd重置为1，进入慢开始
-                    dupAckCount = 0;
-                    
-                    System.out.println("快重传重置 - cwnd=" + String.format("%.2f", cwnd) + ", ssthresh=" + ssthresh);
-                    logCwndChange();  // 记录cwnd变化
-                    
-                    // 重传队首包
-                    if (!window.isEmpty()) {
-                        WindowElem elem = window.peekFirst();
-                        if (elem != null && elem.getPacket() != null) {
-                            sender.udt_send(elem.getPacket());
-                            System.out.println("快重传 - seq=" + elem.getPacket().getTcpH().getTh_seq());
-                        }
-                    }
-                }
-            }
-        } else {
-            // ===== 情况2：新ACK - 拥塞控制窗口增长 =====
+        // ========== 步骤2：分支判断 - 新ACK vs 重复ACK ==========
+        
+        if (ackedCount > 0) {
+            // ===== Case A: 新ACK (ackedCount > 0) =====
             System.out.println("  TCP新ACK - 确认了 " + ackedCount + " 个包");
             
-            dupAckCount = 0;  // 重置重复ACK计数
-            lastAckSeq = ackSeq;
-            
-            // 步骤2：拥塞控制状态机 - 关键修复：累积确认感知
-            if (cwnd < ssthresh) {
-                // 慢开始阶段：指数增长
-                // 老师要求2：一个ACK确认N个包，cwnd 应该增加 N
-                cwnd += ackedCount;
-                System.out.println("  慢开始 - cwnd += " + ackedCount + " => cwnd=" + String.format("%.2f", cwnd));
-                logCwndChange();  // 记录cwnd变化
-            } else {
-                // 拥塞避免阶段：线性增长
-                // 老师要求4：每收到ACK增加 ackedCount * (1/cwnd)
+            // 【关键点3：退出快恢复】检查是否需要退出快恢复
+            if (isFastRecovery) {
+                System.out.println("  >>> 退出快恢复 - cwnd收缩: " + String.format("%.2f", cwnd) + " -> " + ssthresh + " <<<");
+                cwnd = ssthresh;  // 收缩窗口 (Deflate Window)
+                isFastRecovery = false;
+                logCwndChange();
+                
+                // 退出快恢复后，进入拥塞避免阶段（因为cwnd = ssthresh）
                 double increment = ackedCount * (1.0 / cwnd);
                 cwnd += increment;
                 System.out.println("  拥塞避免 - cwnd += " + String.format("%.4f", increment) + " => cwnd=" + String.format("%.2f", cwnd));
-                logCwndChange();  // 记录cwnd变化
+                logCwndChange();
+            } else {
+                // 正常的Tahoe增长逻辑
+                if (cwnd < ssthresh) {
+                    // 慢开始阶段：指数增长
+                    cwnd += ackedCount;
+                    System.out.println("  慢开始 - cwnd += " + ackedCount + " => cwnd=" + String.format("%.2f", cwnd));
+                    logCwndChange();
+                } else {
+                    // 拥塞避免阶段：线性增长
+                    double increment = ackedCount * (1.0 / cwnd);
+                    cwnd += increment;
+                    System.out.println("  拥塞避免 - cwnd += " + String.format("%.4f", increment) + " => cwnd=" + String.format("%.2f", cwnd));
+                    logCwndChange();
+                }
             }
             
             // 限制最大cwnd
             if (cwnd > MAX_CWND) {
                 cwnd = MAX_CWND;
             }
+            
+            // 重置重复ACK计数
+            dupAckCount = 0;
+            lastAckSeq = ackSeq;
             
             // 窗口滑动后定时器管理
             if (window.isEmpty()) {
@@ -260,9 +251,52 @@ public class SenderWindow {
             } else {
                 startTimer();
             }
+            
+        } else {
+            // ===== Case B: 重复ACK (ackedCount == 0) =====
+            
+            if (ackSeq == lastAckSeq) {
+                dupAckCount++;
+                System.out.println("  TCP重复ACK - 计数=" + dupAckCount + "/3");
+                
+                if (isFastRecovery) {
+                    // 【关键点2：窗口膨胀】已在快恢复中，窗口膨胀
+                    cwnd += 1.0;
+                    System.out.println("  >>> 快恢复窗口膨胀 - cwnd += 1 => cwnd=" + String.format("%.2f", cwnd) + " <<<");
+                    logCwndChange();
+                    
+                    // 尝试发送新数据（如果窗口允许）
+                    // 注意：这里需要TCP_Sender配合fillWindow，暂时仅记录
+                    System.out.println("  快恢复期间 - 允许发送新数据");
+                    
+                } else {
+                    // 未进入快恢复，检查是否达到快重传条件
+                    if (dupAckCount == 3) {
+                        // 【关键点1：快重传触发点】
+                        System.out.println("\n!!! 快重传触发 (Reno) !!!");
+                        
+                        // 拥塞控制：ssthresh减半，cwnd = ssthresh + 3
+                        ssthresh = Math.max(2, (int)cwnd / 2);
+                        cwnd = ssthresh + 3;  // 加3抵消已经离开网络的3个包
+                        isFastRecovery = true;  // 进入快恢复状态
+                        
+                        System.out.println("快重传重置 - ssthresh=" + ssthresh + ", cwnd=" + String.format("%.2f", cwnd) + ", 进入快恢复");
+                        logCwndChange();
+                        
+                        // 立即重传队首包
+                        if (!window.isEmpty()) {
+                            WindowElem elem = window.peekFirst();
+                            if (elem != null && elem.getPacket() != null) {
+                                sender.udt_send(elem.getPacket());
+                                System.out.println("快重传 - seq=" + elem.getPacket().getTcpH().getTh_seq());
+                            }
+                        }
+                    }
+                }
+            }
         }
         
-        System.out.println("=== ACK处理完成 - window.size=" + window.size() + ", cwnd=" + String.format("%.2f", cwnd) + ", ssthresh=" + ssthresh + " ===\n");
+        System.out.println("=== ACK处理完成 - window.size=" + window.size() + ", cwnd=" + String.format("%.2f", cwnd) + ", ssthresh=" + ssthresh + ", FastRecovery=" + isFastRecovery + " ===\n");
     }
     
     /**

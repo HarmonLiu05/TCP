@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TCP Tahoe 拥塞窗口可视化脚本
+TCP Reno 拥塞窗口可视化脚本
 从日志文件中提取 CWND 和 SSTHRESH 数据并绘图
+包含快重传、快恢复、以及超时重传是序
 """
 
 import re
@@ -57,7 +58,7 @@ def plot_cwnd(times, cwnds, ssthreshs, output_file='cwnd_plot.png'):
     # 图表配置
     plt.xlabel('Time (seconds)', fontsize=12)
     plt.ylabel('Window Size (packets)', fontsize=12)
-    plt.title('TCP Tahoe Congestion Control - CWND & SSTHRESH', fontsize=14, fontweight='bold')
+    plt.title('TCP Reno Congestion Control - CWND & SSTHRESH (with Fast Recovery)', fontsize=14, fontweight='bold')
     plt.legend(loc='best', fontsize=10)
     plt.grid(True, alpha=0.3)
     
