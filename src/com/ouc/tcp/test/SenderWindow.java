@@ -19,6 +19,7 @@ public class SenderWindow {
     private double cwnd;           // 拥塞窗口（浮点数，支持精确增长）
     private int ssthresh;          // 慢开始阈值
     private static final int MAX_CWND = 64;  // 最大拥塞窗口
+    private long startTime;        // 记录启动时间，用于日志
     
     // ===== 快重传相关 =====
     private int dupAckCount;       // 重复ACK计数
@@ -57,7 +58,11 @@ public class SenderWindow {
         this.sender = sender;
         this.baseTimer = null;
         
+        // 记录启动时间
+        this.startTime = System.currentTimeMillis();
+        
         System.out.println("TCP Tahoe启动 - cwnd=" + cwnd + ", ssthresh=" + ssthresh);
+        logCwndChange();  // 记录初始状态
     }
     
     /**
@@ -147,6 +152,7 @@ public class SenderWindow {
         dupAckCount = 0;                         // 重置重复ACK计数
         
         System.out.println("TCP超时重置 - cwnd=" + cwnd + ", ssthresh=" + ssthresh);
+        logCwndChange();  // 记录cwnd变化
         
         // 步骤2：老师要求 - 只重传窗口首个包（不是所有包）
         if (!window.isEmpty()) {
@@ -207,6 +213,7 @@ public class SenderWindow {
                     dupAckCount = 0;
                     
                     System.out.println("快重传重置 - cwnd=" + String.format("%.2f", cwnd) + ", ssthresh=" + ssthresh);
+                    logCwndChange();  // 记录cwnd变化
                     
                     // 重传队首包
                     if (!window.isEmpty()) {
@@ -231,12 +238,14 @@ public class SenderWindow {
                 // 老师要求2：一个ACK确认N个包，cwnd 应该增加 N
                 cwnd += ackedCount;
                 System.out.println("  慢开始 - cwnd += " + ackedCount + " => cwnd=" + String.format("%.2f", cwnd));
+                logCwndChange();  // 记录cwnd变化
             } else {
                 // 拥塞避免阶段：线性增长
                 // 老师要求4：每收到ACK增加 ackedCount * (1/cwnd)
                 double increment = ackedCount * (1.0 / cwnd);
                 cwnd += increment;
                 System.out.println("  拥塞避免 - cwnd += " + String.format("%.4f", increment) + " => cwnd=" + String.format("%.2f", cwnd));
+                logCwndChange();  // 记录cwnd变化
             }
             
             // 限制最大cwnd
@@ -268,5 +277,13 @@ public class SenderWindow {
      */
     public void fillWindow() {
         // 由 TCP_Sender 的 rdt_send 调用，此处只提供接口
+    }
+    
+    /**
+     * 记录cwnd和ssthresh变化（用于Python绘图）
+     */
+    private void logCwndChange() {
+        long currentTime = System.currentTimeMillis() - startTime;
+        System.out.println("CWND_LOG: TIME: " + currentTime + ", CWND: " + String.format("%.2f", cwnd) + ", SSTHRESH: " + ssthresh);
     }
 }
