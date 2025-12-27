@@ -2,123 +2,116 @@ package com.ouc.tcp.test;
 
 import com.ouc.tcp.client.Client;
 import com.ouc.tcp.client.UDT_Timer;
-import com.ouc.tcp.client.UDT_RetransTask;
 import com.ouc.tcp.message.TCP_PACKET;
+import java.util.LinkedList;
+import java.util.Iterator;
 
 /**
- * 发送方窗口管理类 - TCP协议
- * 使用数组实现的循环队列管理发送缓冲区
- * TCP协议：GBN发送端逻辑 - 单一定时器 + 累积确认 + 超时重传所有
+ * 发送方窗口管理类 - TCP Tahoe协议
+ * 使用LinkedList动态数据结构（老师要求：禁止静态数组）
+ * 实现完整的拥塞控制：慢开始、拥塞避免、快重传、超时重传
  */
 public class SenderWindow {
-    // 窗口数组：使用数组实现循环队列
-    private WindowElem[] window;  // TCP使用GBN的逻辑，不需要每个元素都有定时器
-    // 窗口大小
-    private int size;
-    // 窗口基序号：最早未确认的包的序列号
-    private int base;
-    // 下一个待发送的包的序列号
-    private int nextToSend;
-    // 队尾指针：指向下一个可用位置
-    private int rear;
-    // 超时时间（毫秒）
+    // ===== 老师要求1：使用动态数据结构，禁止静态数组 =====
+    private LinkedList<WindowElem> window;  // 动态链表，避免内存泄漏
+    
+    // ===== 拥塞控制变量 =====
+    private double cwnd;           // 拥塞窗口（浮点数，支持精确增长）
+    private int ssthresh;          // 慢开始阈值
+    private static final int MAX_CWND = 64;  // 最大拥塞窗口
+    
+    // ===== 快重传相关 =====
+    private int dupAckCount;       // 重复ACK计数
+    private int lastAckSeq;        // 上一次收到的ACK序号
+    
+    // ===== 序列号管理 =====
+    private int nextSeqNum;        // 下一个要分配的序列号
+    
+    // ===== 定时器和客户端 =====
     private static final long TIMEOUT_MS = 3000;
-    // 客户端对象
     private Client client;
-    // GBN关键：单一全局定时器（只为base计时）
-    private UDT_Timer baseTimer;
-    // 发送方引用（用于超时重传）
+    private UDT_Timer baseTimer;   // 单一全局定时器
     private TCP_Sender sender;
     
     /**
      * 构造函数
-     * @param size 窗口大小
-     * @param client 客户端对象
-     * @param sender 发送方对象
      */
-    public SenderWindow(int size, Client client, TCP_Sender sender) {
-        this.size = size;
-        this.window = new WindowElem[size];  // TCP使用GBN逻辑，基类WindowElem
-        this.base = 0;
-        this.nextToSend = 0;
-        this.rear = 0;
+    public SenderWindow(Client client, TCP_Sender sender) {
+        // 初始化动态链表
+        this.window = new LinkedList<>();
+        
+        // 初始化拥塞控制参数
+        // 慢开始阶段：初始 cwnd 为 1
+        this.cwnd = 1.0;           // 慢开始：初始窗口为 1
+        this.ssthresh = 16;        // 阈值设为 16
+        
+        // 初始化快重传
+        this.dupAckCount = 0;
+        this.lastAckSeq = -1;
+        
+        // 初始化序列号
+        this.nextSeqNum = 0;
+        
+        // 初始化定时器
         this.client = client;
         this.sender = sender;
-        this.baseTimer = null;  // TCP使用GBN的单一定时器
+        this.baseTimer = null;
         
-        // 初始化窗口数组
-        for (int i = 0; i < size; i++) {
-            window[i] = new WindowElem();  // 使用基类WindowElem
-        }
+        System.out.println("TCP Tahoe启动 - cwnd=" + cwnd + ", ssthresh=" + ssthresh);
     }
     
     /**
-     * 获取索引：序列号转换为数组索引
-     * @param seq 序列号
-     * @return 数组索引
+     * 检查窗口是否已满 - 老师要求3：由cwnd决定
      */
-    private int getIdx(int seq) {
-        return seq % size;
+    public synchronized boolean isFull() {
+        return window.size() >= (int)cwnd;
     }
     
     /**
-     * 检查窗口是否已满
-     * @return 窗口是否已满
+     * 检查窗口是否为空
      */
-    public boolean isFull() {
-        return (rear - base) >= size;
+    public synchronized boolean isEmpty() {
+        return window.isEmpty();
     }
     
     /**
      * 将新包加入窗口
-     * @param packet 要加入的数据包
      */
-    public void pushPacket(TCP_PACKET packet) {
-        int idx = getIdx(rear);
-        window[idx].setPacket(packet);
-        window[idx].setFlag(WindowElem.NOT_ACKED);
-        rear++;
+    public synchronized void pushPacket(TCP_PACKET packet) {
+        WindowElem elem = new WindowElem();
+        elem.setPacket(packet);
+        elem.setFlag(WindowElem.NOT_ACKED);
+        window.addLast(elem);
         
         System.out.println("TCP入窗 - seq=" + packet.getTcpH().getTh_seq() + 
-                         " (rear=" + rear + ")");
+                         " (window.size=" + window.size() + ", cwnd=" + String.format("%.2f", cwnd) + ")");
     }
     
     /**
      * 发送数据包并启动/重启定时器
-     * TCP关键：GBN逻辑 - 只有一个全局定时器，用于最早的未确认包
-     * @param sender 发送方对象（用于访问 udt_send）
+     * @param packet 要发送的数据包
      */
-    public void sendPacket(TCP_Sender sender) {
-        if (nextToSend < rear) {
-            int idx = getIdx(nextToSend);
-            TCP_PACKET packet = window[idx].getPacket();
-            
+    public synchronized void sendPacket(TCP_PACKET packet, TCP_Sender sender) {
+        if (packet != null) {
             // 发送数据包
             sender.udt_send(packet);
             
             System.out.println("TCP发送 - seq=" + packet.getTcpH().getTh_seq() + 
-                             " (base=" + base + ", nextToSend=" + nextToSend + ", rear=" + rear + ")");
+                             " (window.size=" + window.size() + ", cwnd=" + String.format("%.2f", cwnd) + ")");
             
-            // 移动 nextToSend 指针
-            nextToSend++;
-            
-            // TCP关键：GBN定时器管理
-            // 如果是窗口从空变为非空（即base位置的包被发送），启动定时器
-            if (base == nextToSend - 1) {  // 刚才发送的是base位置的包
+            // 如果窗口非空，确保定时器运行
+            if (!window.isEmpty() && baseTimer == null) {
                 startTimer();
             }
         }
     }
     
     /**
-     * 启动全局定时器 - TCP使用GBN逻辑
-     * 只有一个定时器，用于base位置
+     * 启动全局定时器
      */
     private void startTimer() {
-        // 先停止旧的定时器
         stopTimer();
         
-        // 创建新的定时器，超时时重传所有未确认的包
         baseTimer = new UDT_Timer();
         baseTimer.schedule(new java.util.TimerTask() {
             @Override
@@ -127,7 +120,7 @@ public class SenderWindow {
             }
         }, TIMEOUT_MS);
         
-        System.out.println("TCP启动定时器 - base=" + base);
+        System.out.println("TCP启动定时器");
     }
     
     /**
@@ -138,113 +131,142 @@ public class SenderWindow {
             baseTimer.cancel();
             baseTimer.purge();
             baseTimer = null;
-            System.out.println("TCP停止定时器");
         }
     }
     
     /**
-     * 超时处理：TCP使用GBN逻辑 - 重传所有未确认的包
+     * 超时处理 - 老师要求4：只重传队首一个包
+     * TCP Tahoe: 超时后 cwnd=1，ssthresh减半
      */
-    private void onTimeout() {
-        System.out.println("\n!!! TCP超时 - 重传窗口内所有包 [" + base + "," + nextToSend + ") !!!");
+    private synchronized void onTimeout() {
+        System.out.println("\n!!! TCP超时 - Tahoe协议 !!!");
         
-        // 1. 重传所有已发送但未确认的包
-        for (int i = base; i < nextToSend; i++) {
-            int idx = getIdx(i);
-            TCP_PACKET packet = window[idx].getPacket();
-            if (packet != null) {
+        // 步骤1：拥塞控制状态重置
+        ssthresh = Math.max(2, (int)cwnd / 2);  // ssthresh = max(2, cwnd/2)
+        cwnd = 1.0;                              // cwnd 重置为 1
+        dupAckCount = 0;                         // 重置重复ACK计数
+        
+        System.out.println("TCP超时重置 - cwnd=" + cwnd + ", ssthresh=" + ssthresh);
+        
+        // 步骤2：老师要求 - 只重传窗口首个包（不是所有包）
+        if (!window.isEmpty()) {
+            WindowElem elem = window.peekFirst();
+            if (elem != null && elem.getPacket() != null) {
+                TCP_PACKET packet = elem.getPacket();
                 sender.udt_send(packet);
-                System.out.println("TCP重传 - seq=" + packet.getTcpH().getTh_seq());
+                System.out.println("TCP重传队首 - seq=" + packet.getTcpH().getTh_seq());
             }
         }
         
-        // 2. Bug修复：只有当窗口非空（还有未确认的包）时，才重启定时器
-        // 防止窗口已空但定时器仍在运行导致的死循环
-        if (base < rear) {
+        // 步骤3：重启定时器（只在窗口非空时）
+        if (!window.isEmpty()) {
             startTimer();
-            System.out.println("TCP启动定时器 - base=" + base);
         } else {
-            // 窗口已空，停止定时器
             stopTimer();
-            System.out.println("TCP窗口已空 - 停止定时器");
         }
     }
     /**
-     * 处理 ACK - TCP关键：GBN的累积确认
-     * 收到ACK n，表示 n 及之前的所有包都已确认
-     * @param seq 收到的 ACK 序列号
+     * 处理 ACK - TCP Tahoe核心逻辑
+     * 老师要求2：累积确认感知 + 拥塞控制
      */
-    public void ackPacket(int seq) {
-        System.out.println("\n=== TCP处理ACK - seq=" + seq + " (base=" + base + ", rear=" + rear + ") ===");
+    public synchronized void ackPacket(int ackSeq) {
+        System.out.println("\n=== TCP处理ACK - seq=" + ackSeq + " (window.size=" + window.size() + ", cwnd=" + String.format("%.2f", cwnd) + ") ===");
         
-        // TCP累积确认（GBN逻辑）：ACK n 表示 n 及之前的所有包都已确认
-        if (seq >= base && seq < rear) {
-            // 标记所有 <= seq 的包为已确认
-            for (int i = base; i <= seq && i < rear; i++) {
-                int idx = getIdx(i);
-                if (!window[idx].isAcked()) {
-                    window[idx].setFlag(WindowElem.ACKED);
-                    System.out.println("  >>> TCP确认 - seq=" + i + " (idx=" + idx + ") <<<");
+        // 步骤1：清理并计数 - 移除所有 seq <= ackSeq 的包
+        // 关键：计数本次ACK实际移除了多少个包
+        int ackedCount = 0;
+        Iterator<WindowElem> iter = window.iterator();
+        while (iter.hasNext()) {
+            WindowElem elem = iter.next();
+            TCP_PACKET packet = elem.getPacket();
+            if (packet != null) {
+                int seq = packet.getTcpH().getTh_seq();
+                if (seq <= ackSeq) {
+                    // 老师要求2：显式 remove 防止内存泄漏
+                    iter.remove();
+                    ackedCount++;
+                    System.out.println("  移除已确认包 - seq=" + seq);
                 }
             }
-            
-            // 滑动窗口
-            slideWindow();
-            
-        } else if (seq < base) {
-            System.out.println("  TCP重复ACK - seq=" + seq + " < base=" + base + " (已确认过)");
-        } else {
-            System.out.println("  TCP警告 - seq=" + seq + " 不在窗口内 [" + base + "," + rear + ")");
         }
         
-        System.out.println("=== ACK处理完成 ===\n");
-    }
-    
-    /**
-     * 滑动窗口 - TCP关键：GBN的累积滑动
-     * 从 base 开始，连续滑动所有已确认的包
-     */
-    private void slideWindow() {
-        int slideCount = 0;
-        int oldBase = base;
-        
-        // 循环检查 base 指向的包是否已确认
-        while (base < rear) {
-            int idx = getIdx(base);
-            
-            if (window[idx].isAcked()) {
-                // 重置该元素
-                window[idx].reset();
-                // 滑动 base
-                base++;
-                slideCount++;
-            } else {
-                // base 指向的包未确认，停止滑动
-                break;
+        // 判断是否是重复ACK
+        if (ackedCount == 0) {
+            // ===== 情况1：重复ACK - 快重传逻辑 =====
+            if (ackSeq == lastAckSeq) {
+                dupAckCount++;
+                System.out.println("  TCP重复ACK - 计数=" + dupAckCount + "/3");
+                
+                // 收到 3 个重复ACK，触发快重传
+                if (dupAckCount == 3) {
+                    System.out.println("\n!!! 快重传触发 !!!");
+                    
+                    // 拥塞控制：Tahoe特性 - ssthresh减半，cwnd重置为1
+                    ssthresh = Math.max(2, (int)cwnd / 2);
+                    cwnd = 1.0;  // Tahoe: 快重传后cwnd重置为1，进入慢开始
+                    dupAckCount = 0;
+                    
+                    System.out.println("快重传重置 - cwnd=" + String.format("%.2f", cwnd) + ", ssthresh=" + ssthresh);
+                    
+                    // 重传队首包
+                    if (!window.isEmpty()) {
+                        WindowElem elem = window.peekFirst();
+                        if (elem != null && elem.getPacket() != null) {
+                            sender.udt_send(elem.getPacket());
+                            System.out.println("快重传 - seq=" + elem.getPacket().getTcpH().getTh_seq());
+                        }
+                    }
+                }
             }
-        }
-        
-        if (slideCount > 0) {
-            System.out.println("TCP窗口滑动 - 从 base=" + oldBase + " 滑动到 " + base + 
-                             " (滑动" + slideCount + "个包)");
+        } else {
+            // ===== 情况2：新ACK - 拥塞控制窗口增长 =====
+            System.out.println("  TCP新ACK - 确认了 " + ackedCount + " 个包");
             
-            // TCP关键：GBN的窗口滑动后定时器管理
-            if (base == rear) {
-                // 窗口已空，停止定时器
-                stopTimer();
-                System.out.println("TCP窗口已空 - 停止定时器");
+            dupAckCount = 0;  // 重置重复ACK计数
+            lastAckSeq = ackSeq;
+            
+            // 步骤2：拥塞控制状态机 - 关键修复：累积确认感知
+            if (cwnd < ssthresh) {
+                // 慢开始阶段：指数增长
+                // 老师要求2：一个ACK确认N个包，cwnd 应该增加 N
+                cwnd += ackedCount;
+                System.out.println("  慢开始 - cwnd += " + ackedCount + " => cwnd=" + String.format("%.2f", cwnd));
             } else {
-                // 窗口仍有未确认的包，重启定时器
+                // 拥塞避免阶段：线性增长
+                // 老师要求4：每收到ACK增加 ackedCount * (1/cwnd)
+                double increment = ackedCount * (1.0 / cwnd);
+                cwnd += increment;
+                System.out.println("  拥塞避免 - cwnd += " + String.format("%.4f", increment) + " => cwnd=" + String.format("%.2f", cwnd));
+            }
+            
+            // 限制最大cwnd
+            if (cwnd > MAX_CWND) {
+                cwnd = MAX_CWND;
+            }
+            
+            // 窗口滑动后定时器管理
+            if (window.isEmpty()) {
+                stopTimer();
+                System.out.println("  窗口已空 - 停止定时器");
+            } else {
                 startTimer();
             }
         }
+        
+        System.out.println("=== ACK处理完成 - window.size=" + window.size() + ", cwnd=" + String.format("%.2f", cwnd) + ", ssthresh=" + ssthresh + " ===\n");
     }
     
     /**
      * 获取下一个序列号
-     * @return 下一个可用的序列号
      */
     public int getNextSeq() {
-        return rear;
+        return nextSeqNum++;
+    }
+    
+    /**
+     * 填充窗口 - 在cwnd允许的范围内发送数据
+     */
+    public void fillWindow() {
+        // 由 TCP_Sender 的 rdt_send 调用，此处只提供接口
     }
 }
