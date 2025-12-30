@@ -74,22 +74,23 @@ public class TCP_Sender extends TCP_Sender_ADT {
 	}
 
 	@Override
-	//接收到ACK报文：检查校验和，将确认号插入ack队列;NACK的确认号为－1；不需要修改
+	//接收到ACK报文：通过ack字段区分ACK/NACK，NACK的确认号为-1
 	public void recv(TCP_PACKET recvPack) {
 		System.out.println("Receive ACK Number： "+ recvPack.getTcpH().getTh_ack());
-		// 检查eflag：如果是1（错误），立即重传
-		if (recvPack.getTcpH().getTh_eflag() == 1) {
-			System.out.println("Receive NACK: eflag=1, need retransmit");
-			// NACK，立即重传
+		
+		// RDT2.0: 通过ack字段值区分ACK和NACK
+		if (recvPack.getTcpH().getTh_ack() == -1) {
+			// 收到NACK（ack=-1），数据出错，立即重传
+			System.out.println("Receive NACK: ack=-1, need retransmit");
 			System.out.println("Retransmit: "+tcpPack.getTcpH().getTh_seq());
 			udt_send(tcpPack);
 		} else if (recvPack.getTcpH().getTh_ack() == tcpPack.getTcpH().getTh_seq()) {
-			// 收到正确ACK，发送下一包
+			// 收到正确ACK（ack=seq），数据正确接收，发送下一包
 			System.out.println("Clear: "+tcpPack.getTcpH().getTh_seq());
 			flag = 1;
 		} else {
-			// 收到错误的ACK号，重传
-			System.out.println("Retransmit: "+tcpPack.getTcpH().getTh_seq());
+			// 收到错误的ACK号（可能是旧的ACK），重传当前包
+			System.out.println("Wrong ACK number, Retransmit: "+tcpPack.getTcpH().getTh_seq());
 			udt_send(tcpPack);
 		}
 	    System.out.println();
