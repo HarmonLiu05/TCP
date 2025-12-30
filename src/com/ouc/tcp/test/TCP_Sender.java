@@ -75,14 +75,23 @@ public class TCP_Sender extends TCP_Sender_ADT {
 	}
 
 	@Override
-	//接收到ACK报文：RDT2.2 通过检测重复ACK来判断错误
+	//接收到ACK报文：RDT2.2 先检查ACK包校验和，再检测重复ACK
 	public void recv(TCP_PACKET recvPack) {
 		int receivedAck = recvPack.getTcpH().getTh_ack();
 		int currentSeq = tcpPack.getTcpH().getTh_seq();
 			
 		System.out.println("Receive ACK Number： " + receivedAck + " (Current seq: " + currentSeq + ")");
+		
+		//首先检查ACK包本身的校验和
+		if(CheckSum.computeChkSum(recvPack) != recvPack.getTcpH().getTh_sum()) {
+			//ACK包本身损坏，重传当前数据包
+			System.out.println("RDT2.2 - Corrupted ACK detected, Retransmit: " + currentSeq);
+			udt_send(tcpPack);
+			System.out.println();
+			return;  //直接返回，不再处理后续逻辑
+		}
 			
-		//RDT 2.2 核心逻辑：检测重复ACK
+		//RDT 2.2 核心逻辑：ACK包完好，检测重复ACK
 		if (receivedAck == currentSeq) {
 			// 情况1：收到正确ACK，确认号与当前发送序号匹配
 			System.out.println("RDT2.2 - Correct ACK, Clear: " + currentSeq);

@@ -32,8 +32,8 @@ public class TCP_Receiver extends TCP_Receiver_ADT {
 			tcpH.setTh_ack(recvPack.getTcpH().getTh_seq());
 			ackPack = new TCP_PACKET(tcpH, tcpS, recvPack.getSourceAddr());
 			tcpH.setTh_sum(CheckSum.computeChkSum(ackPack));
-			//设置错误控制标志为0（数据无错误）
-			tcpH.setTh_eflag((byte)0);
+			//eflag=1表示ACK包在信道中也可能被损坏
+			tcpH.setTh_eflag((byte)1);
 			//回复ACK报文段
 			reply(ackPack);
 			
@@ -55,8 +55,8 @@ public class TCP_Receiver extends TCP_Receiver_ADT {
 			tcpH.setTh_ack(lastCorrectSeq);  // 发送上一个正确的ACK（重复ACK）
 			ackPack = new TCP_PACKET(tcpH, tcpS, recvPack.getSourceAddr());
 			tcpH.setTh_sum(CheckSum.computeChkSum(ackPack));
-			//ACK包也设置为0（这是正常的ACK，只是重复的）
-			tcpH.setTh_eflag((byte)0);
+			//eflag=1表示ACK包在信道中也可能被损坏
+			tcpH.setTh_eflag((byte)1);
 			//回复重复ACK
 			reply(ackPack);
 			
