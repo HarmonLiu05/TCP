@@ -82,14 +82,22 @@ public class TCP_Sender extends TCP_Sender_ADT {
 	}
 
 	@Override
-	//接收到ACK报文：RDT 3.0 处理ACK，包括重复ACK检测
+	//接收到ACK报文：RDT 3.0 先检查ACK校验和，再处理ACK
 	public void recv(TCP_PACKET recvPack) {
 		int receivedAck = recvPack.getTcpH().getTh_ack();
 		int currentSeq = tcpPack.getTcpH().getTh_seq();
 		
 		System.out.println("RDT3.0 - Receive ACK: " + receivedAck + " (Current seq: " + currentSeq + ")");
 		
-		// RDT 3.0: 检查收到的ACK
+		//首先检查ACK包本身的校验和
+		if(CheckSum.computeChkSum(recvPack) != recvPack.getTcpH().getTh_sum()) {
+			//ACK包损坏，忽略，依赖超时重传
+			System.out.println("RDT3.0 - Corrupted ACK detected, ignore and wait for timeout");
+			System.out.println();
+			return;
+		}
+		
+		// RDT 3.0: ACK包完好，检查收到的ACK
 		if (receivedAck == currentSeq) {
 			// 情况1：收到正确ACK，确认号与当前发送序号匹配
 			System.out.println("RDT3.0 - Correct ACK, Clear: " + currentSeq);
