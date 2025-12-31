@@ -56,6 +56,7 @@
 与 SR 协议不同，GBN 仅维护**一个全局定时器**，该定时器始终**跟踪窗口左沿（Base）**。
 
 *   **定时器启动规则**：
+    
     *   当发送窗口从空变为非空（发送 `base` 包）时，启动定时器。
     *   当窗口滑动（`base` 前移）且窗口仍不为空时，**重启**定时器。
 *   **批量重传实现** (`onTimeout()`):
@@ -81,6 +82,7 @@ GBN 采用累积确认，即 `ACK n` 表示序号 `n` 及之前的所有包都�
 
 *   **接收方实现** (`TCP_Receiver.java`):
     接收方**不缓存**乱序包，只维护一个 `expectedSeq`（期望序号）。
+    
     ```java
     if (seq == expectedSeq) {
         // 收到期望的包：交付数据，期望序号+1，回复当前ACK
@@ -93,6 +95,7 @@ GBN 采用累积确认，即 `ACK n` 表示序号 `n` 及之前的所有包都�
     }
     ```
 *   **发送方应用** (`SenderWindow.java`):
+    
     ```java
     public void ackPacket(int seq) {
         // 收到 ACK seq，意味着 base 到 seq 之间的所有包都确认了
@@ -114,6 +117,7 @@ GBN 采用累积确认，即 `ACK n` 表示序号 `n` 及之前的所有包都�
 *   **窗口移动**：
     当 `base` 位置的包被标记为 ACKED 时，窗口左沿右移（`base++`），直到遇到未确认的包或队尾。
 *   **计时器跟踪新左沿** (`slideWindow()`):
+    
     ```java
     private void slideWindow() {
         // ... (循环执行 base++) ...
