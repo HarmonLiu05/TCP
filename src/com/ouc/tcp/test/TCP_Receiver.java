@@ -37,6 +37,9 @@ public class TCP_Receiver extends TCP_Receiver_ADT {
 
 	@Override
 	// TCP协议接收方法：SR缓存 + GBN累积确认 + Delayed ACK
+	//当网络上有一个数据包到达接收端电脑。
+	//底层框架捕获这个包。
+	//框架自动调用你写的 rdt_recv(TCP_PACKET recvPack) 方法。
 	public void rdt_recv(TCP_PACKET recvPack) {
 		// 步骤1：校验数据完整性
 		if (CheckSum.computeChkSum(recvPack) == recvPack.getTcpH().getTh_sum()) {
@@ -50,24 +53,25 @@ public class TCP_Receiver extends TCP_Receiver_ADT {
 				// ===== 情况1：收到期望的包（按序到达）=====
 				System.out.println("TCP接收 - seq=" + seq + " 是期望的包（按序）");
 				
-				// 交付该包及所有连续缓存的包
+				// 交付该包及 循环交付所有连续缓存的包
 				TCP_PACKET deliverablePacket;
 				while ((deliverablePacket = receiverWindow.getPacketToDeliver()) != null) {
 					dataQueue.add(deliverablePacket.getTcpS().getData());
 				}
 				
 				// TCP Delayed ACK：按序包启动延迟ACK（500ms后发送）
+				// 这是为了减少网络上的 ACK 包数量 以及 重复确认
+				//receiverWindow.getBase() 维护的是下一个期望接收的序号。也就是最左边的未接收到的包
 				int ackSeq = receiverWindow.getBase() - 1;  // 累积确认：base-1
 				scheduleDelayedAck(ackSeq, recvPack.getSourceAddr());
 				System.out.println("TCP Delayed ACK - 将在500ms后回复ACK=" + ackSeq);
 				
 			} else if (result == ReceiverWindow.ORDERED) {
-				// ===== 情况2：乱序包（窗口内）- 缓存并立即发送Duplicate ACK =====
+				// ===== 情况2：乱序包（窗口内）- 缓存并立即发送因为乱序意味着可能丢包了，必须赶紧告诉发送方（重复 ACK），催它快重传
 				System.out.println("TCP接收 - seq=" + seq + " 是乱序包（已缓存）");
-				
 				// 取消延迟ACK，立即发送重复ACK
 				cancelDelayedAck();
-				
+				//Duplicate--重复
 				// 立即回复Duplicate ACK（累积确认：base-1）
 				int dupAckSeq = receiverWindow.getBase() - 1;
 				if (dupAckSeq >= 0) {
@@ -76,7 +80,7 @@ public class TCP_Receiver extends TCP_Receiver_ADT {
 				}
 				
 			} else if (result == ReceiverWindow.DUPLICATE) {
-				// ===== 情况3：重复包（base之前）- 立即重发ACK =====
+				// ===== 情况3：重复包- 立即重发ACK =====
 				System.out.println("TCP接收 - seq=" + seq + " 是重复包（已交付）");
 				
 				// 立即重发ACK
@@ -146,7 +150,7 @@ public class TCP_Receiver extends TCP_Receiver_ADT {
 		tcpH.setTh_ack(ackSeq);
 		ackPack = new TCP_PACKET(tcpH, tcpS, destAddr);
 		tcpH.setTh_sum(CheckSum.computeChkSum(ackPack));
-		tcpH.setTh_eflag((byte)0);  // ACK包不模拟错误
+		tcpH.setTh_eflag((byte)7);  // ACK包得模拟错误
 		reply(ackPack);
 	}
 

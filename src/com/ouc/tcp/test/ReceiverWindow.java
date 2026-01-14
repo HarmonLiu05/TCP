@@ -8,11 +8,15 @@ import com.ouc.tcp.message.TCP_PACKET;
  * TCP协议：SR的缓存能力 + GBN的累积确认
  */
 public class ReceiverWindow {
-    // 窗口数组：使用数组实现循环队列
+    // 窗口数组：是一个固定长度的数组 如何用有限的数组存无限的序列号？
+    // Seq (序列号)： 是一直增长的，0, 1, 2, ..., 10000, ... 无穷无尽老师给的底层框架固定发送1000个包 seq从0-999 我规定从0开始）
+    //数组里放的是 ReceiverElem 对象（它包含一个 flag 标记是否已接收也就是是否被缓存，是否入窗，和一个 packet 数据包）。
+    //Idx (数组下标)： 只有 0 到 9 (如果 size=10)
     private ReceiverElem[] window;
-    // 窗口大小
+    //size是窗口的大小（比如 10）。
+    //接收方的有效接收范围是：[base, base + size - 1]。
     private int size;
-    // 窗口基序号：期望接收的下一个包的序列号
+    // 窗口基序号：期望接收的下一个包的序列号 从0-999（一共100个）
     private int base;
     
     // bufferPacket 返回值常量
@@ -29,22 +33,29 @@ public class ReceiverWindow {
     public ReceiverWindow(int size, int startSeq) {
         this.size = size;
         this.window = new ReceiverElem[size];
+        //窗口数组：是一个固定长度的数组
         this.base = startSeq;
+        // 窗口基序号：期望接收的下一个包的序列号
+        // 接收方的有效接收范围是：[base, base + size - 1]。
         
         // 初始化窗口数组
         for (int i = 0; i < size; i++) {
-            window[i] = new ReceiverElem();
+            window[i] = new ReceiverElem();// 初始状态为 WAIT（等待接收） packet = null;
         }
     }
     
     /**
      * 获取索引：序列号转换为数组索引
-     * @param seq 序列号
+     * @param seq 接收方收到的数据包序列号
      * @return 数组索引
      */
     private int getIdx(int seq) {
         return seq % size;
     }
+    //假设 size=10。
+    //收到 seq=1 -> 放在下标 1。
+    //收到 seq=11 -> 放在下标 1 (11 % 10 = 1)。
+    //这就是循环利用数组空间。只有确定“这个数据包我要接收”了，才需要计算它在数组里的位置，把它存进去。
     
     /**
      * 缓存数据包 - TCP协议
@@ -66,19 +77,19 @@ public class ReceiverWindow {
             return UNORDERED;
         }
         
-        // 情况3：窗口内的包
+        // 情况3：一定是窗口内的包 说明我有可能会缓存到数组里面 所以需要获取seq对应的数组索引
         int idx = getIdx(seq);
         
         // 检查是否已经缓存过（重复接收）
         if (window[idx].isBuffered() && window[idx].getPacket() != null) {
             int cachedSeq = window[idx].getPacket().getTcpH().getTh_seq();
             if (cachedSeq == seq) {
-                System.out.println("TCP接收窗口 - seq=" + seq + " 重复接收（已在缓冲区），仍需回复ACK");
-                return (seq == base) ? IS_BASE : ORDERED;
+                System.out.println("TCP接收窗口 - seq=" + seq + " 重复接收（已在缓冲区），无需重复缓存");
+                return DUPLICATE;  // 重复包，直接返回
             }
         }
         
-        // 缓存该包
+        // 缓存该包（只有未缓存过的包才会执行到这里）
         window[idx].setPacket(packet);
         window[idx].markBuffered();
         
@@ -96,6 +107,7 @@ public class ReceiverWindow {
      * @return 可交付的数据包，如果没有则返回 null
      */
     public TCP_PACKET getPacketToDeliver() {
+
         int idx = getIdx(base);
         
         // 检查 base 位置是否已缓存
@@ -113,7 +125,7 @@ public class ReceiverWindow {
             
             return packet;
         }
-        
+        //base位置没有缓存的包
         return null;
     }
     

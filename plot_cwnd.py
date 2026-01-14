@@ -44,8 +44,28 @@ def parse_log_file(log_file):
         print(f"解析错误: {e}")
         sys.exit(1)
 
-def plot_cwnd(times, cwnds, ssthreshs, output_file='cwnd_plot.png'):
-    """绘制 CWND 和 SSTHRESH 随时间变化的图表"""
+def plot_cwnd(times, cwnds, ssthreshs, output_file='cwnd_plot.png', min_time=None, max_time=None):
+    """绘制 CWND 和 SSTHRESH 随时间变化的图表
+    
+    参数:
+        times: 时间序列
+        cwnds: CWND 值序列
+        ssthreshs: SSTHRESH 值序列
+        output_file: 输出文件名
+        min_time: 最小显示时间(秒)，None 表示从0开始
+        max_time: 最大显示时间(秒)，None 表示显示到结束
+    """
+    
+    # 如果指定了时间范围，过滤数据
+    if min_time is not None or max_time is not None:
+        min_t = min_time if min_time is not None else 0
+        max_t = max_time if max_time is not None else float('inf')
+        
+        filtered_indices = [i for i, t in enumerate(times) if min_t <= t <= max_t]
+        times = [times[i] for i in filtered_indices]
+        cwnds = [cwnds[i] for i in filtered_indices]
+        ssthreshs = [ssthreshs[i] for i in filtered_indices]
+        print(f"过滤后显示 {len(times)} 条数据 (时间范围: {min_t} - {max_t if max_t != float('inf') else '结束'} 秒)")
     
     plt.figure(figsize=(12, 6))
     
@@ -63,7 +83,14 @@ def plot_cwnd(times, cwnds, ssthreshs, output_file='cwnd_plot.png'):
     plt.grid(True, alpha=0.3)
     
     # 设置坐标轴
-    plt.xlim(left=0)
+    if min_time is not None:
+        plt.xlim(left=min_time)
+    else:
+        plt.xlim(left=0)
+    
+    if max_time is not None:
+        plt.xlim(right=max_time)
+    
     plt.ylim(bottom=0)
     
     # 保存图片
@@ -81,10 +108,39 @@ def main():
     else:
         log_file = 'cwnd_data.txt'  # 默认使用提取后的文件
         print(f"使用默认数据文件: {log_file}")
-        print("用法: python plot_cwnd.py <数据文件路径>")
+        print("用法: python plot_cwnd.py <数据文件路径> [起始时间(秒)] [结束时间(秒)]")
+        print("示例:")
+        print("  python plot_cwnd.py cwnd_data.txt          # 显示全部数据")
+        print("  python plot_cwnd.py cwnd_data.txt 0 30     # 显示0-30秒")
+        print("  python plot_cwnd.py cwnd_data.txt 10 50    # 显示10-50秒")
+        print("  python plot_cwnd.py cwnd_data.txt 20       # 显示20秒到结束")
         print("提示: 先运行 PowerShell 命令提取数据:")
         print('  Select-String -Path tcp_output.log -Pattern "CWND_LOG" | ForEach-Object { $_.Line } | Out-File -FilePath cwnd_data.txt -Encoding UTF8')
         print()
+    
+    # 解析时间范围参数
+    min_time = None
+    max_time = None
+    
+    if len(sys.argv) > 2:
+        try:
+            min_time = float(sys.argv[2])
+            print(f"起始时间: {min_time} 秒")
+        except ValueError:
+            print(f"警告: 无效的起始时间参数 '{sys.argv[2]}'")
+    
+    if len(sys.argv) > 3:
+        try:
+            max_time = float(sys.argv[3])
+            print(f"结束时间: {max_time} 秒")
+        except ValueError:
+            print(f"警告: 无效的结束时间参数 '{sys.argv[3]}'")
+    
+    # 如果只指定了一个参数，视为结束时间（保持向后兼容）
+    if len(sys.argv) == 3 and min_time is not None:
+        max_time = min_time
+        min_time = None
+        print(f"将显示 0 到 {max_time} 秒的数据（兼容模式）")
     
     # 解析日志
     times, cwnds, ssthreshs = parse_log_file(log_file)
@@ -96,7 +152,7 @@ def main():
         sys.exit(1)
     
     # 绘图
-    plot_cwnd(times, cwnds, ssthreshs)
+    plot_cwnd(times, cwnds, ssthreshs, min_time=min_time, max_time=max_time)
     
     # 统计信息
     print(f"\n数据统计:")

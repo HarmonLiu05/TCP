@@ -71,8 +71,7 @@ public class WindowElem {
     
     /**
      * 重置元素
-     */
-    public void reset() {
+     */ public void reset() {
         this.packet = null;
         this.flag = WAIT;
     }
